@@ -1,0 +1,183 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+
+use FindBin;
+use lib "$FindBin::Bin/../perl_lib";
+
+use EPrints;
+
+
+use LWP::UserAgent;
+use JSON qw(encode_json);
+
+my $repo_id = shift @ARGV
+  or die "Usage: $0 ARCHIVE_ID\n";
+
+# Start EPrints session
+my $session = EPrints::Session->new( 1, $repo_id, undef, undef )
+  or die "Failed to create EPrints session\n";
+
+my $repo = $session;
+
+my $cfg = $repo->config( "solr" )
+  or die "No solr config found in cfg.d/solr_facet.pl\n";
+
+my $endpoint = $cfg->{endpoint}
+  or die "solr.endpoint not set in config\n";
+
+# Dataset – use 'archive' or 'eprint' depending on your install
+my $ds = $session->dataset( "archive" );   # if this fails, change to "eprint"
+my $list = $ds->search(
+  filters => [],
+);
+
+my $ua = LWP::UserAgent->new( timeout => 20 );
+
+my @batch;
+my $batch_size = 100;
+
+$list->map( sub {
+    my( undef, undef, $eprint ) = @_;
+
+    my $doc = _build_solr_doc( $session, $eprint );
+    push @batch, $doc if $doc;
+
+    if( @batch >= $batch_size )
+    {
+        _post_batch( $ua, $endpoint, \@batch );
+        @batch = ();
+    }
+}, undef );
+
+# send remainder
+_post_batch( $ua, $endpoint, \@batch ) if @batch;
+
+# commit
+my $commit_res = $ua->post(
+    "$endpoint/update?commit=true",
+    'Content-Type' => 'text/xml',
+    Content        => '<commit/>',
+);
+warn "Solr commit failed: " . $commit_res->status_line
+    unless $commit_res->is_success;
+
+$session->terminate;
+exit(0);
+
+#####################
+# helper functions
+#####################
+
+sub _build_solr_doc
+{
+    my( $session, $eprint ) = @_;
+
+    my $epid = $eprint->id;
+    return undef unless defined $epid;
+
+    my $doc = {
+        # required unique key for Solr
+        id          => "$epid",   # Solr's uniqueKey = id (usually string)
+        # our own id field we use in EPrints
+        eprintid_i  => $epid,
+    };
+
+    # ----- BASIC BIBLIO -----
+    $doc->{title_t}    = $eprint->value( "title" );
+    $doc->{abstract_t} = $eprint->value( "abstract" );
+    $doc->{type_ss}    = $eprint->value( "type" );          # Item Type
+    $doc->{publication_ss} = $eprint->value( "publication" );
+    $doc->{issn_s}     = $eprint->value( "issn" );
+    $doc->{isbn_s}     = $eprint->value( "isbn" );
+    $doc->{refereed_s} = $eprint->value( "refereed" );
+    $doc->{full_text_status_s} = $eprint->value( "full_text_status" );
+
+    # ----- DATE -> YEAR -----
+    if( $eprint->exists_and_set( "date" ) )
+    {
+        my $date = $eprint->value( "date" ); # e.g. 2023-05-10
+        if( $date && $date =~ /^(\d{4})/ )
+        {
+            $doc->{year_i} = int($1);
+        }
+    }
+
+    # ----- SUBJECTS -----
+    if( $eprint->exists_and_set( "subjects" ) )
+    {
+        my $subs = $eprint->value( "subjects" ); # arrayref of subject ids
+        $doc->{subjects_ss} = $subs if ref $subs eq 'ARRAY';
+    }
+
+    # ----- DIVISIONS -----
+    if( $eprint->exists_and_set( "divisions" ) )
+    {
+        my $divs = $eprint->value( "divisions" ); # arrayref
+        $doc->{divisions_ss} = $divs if ref $divs eq 'ARRAY';
+    }
+
+    # ----- KEYWORDS -----
+    if( $eprint->exists_and_set( "keywords" ) )
+    {
+        my $kw = $eprint->value( "keywords" );
+        if( ref $kw eq 'ARRAY' )
+        {
+            $doc->{keywords_ss} = $kw;
+        }
+        else
+        {
+            my @k = grep { $_ ne "" } split( /\s*[,;]\s*/, $kw || "" );
+            $doc->{keywords_ss} = \@k if @k;
+        }
+    }
+
+    # ----- DEPARTMENT / AFFILIATION -----
+    $doc->{department_ss} = $eprint->value( "department" )
+        if $eprint->exists_and_set( "department" );
+
+    $doc->{affiliation_ss} = $eprint->value( "affiliation" )
+        if $eprint->exists_and_set( "affiliation" );
+
+    # ----- CREATORS (flatten names) -----
+    if( $eprint->exists_and_set( "creators" ) )
+    {
+        my $creators = $eprint->value( "creators" ); # arrayref of hashes
+        my @names;
+        foreach my $c (@{$creators})
+        {
+            next unless ref $c eq 'HASH';
+            my $given  = $c->{name}->{given}  || "";
+            my $family = $c->{name}->{family} || "";
+            my $full   = join( " ", grep { $_ } ($given, $family) );
+            push @names, $full if $full;
+        }
+        $doc->{creators_ss} = \@names if @names;
+    }
+
+    return $doc;
+}
+
+
+sub _post_batch
+{
+    my( $ua, $endpoint, $batch ) = @_;
+    return unless @$batch;
+
+    my $json = encode_json( $batch );
+    my $url  = "$endpoint/update/json?commitWithin=10000&overwrite=true";
+
+    my $res = $ua->post(
+        $url,
+        'Content-Type' => 'application/json; charset=utf-8',
+        Content        => $json,
+    );
+
+    unless( $res->is_success )
+    {
+        warn "Solr batch update failed: " . $res->status_line . "\n";
+        warn "Response body:\n" . $res->decoded_content . "\n";
+    }
+}
+
