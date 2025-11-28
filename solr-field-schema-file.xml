@@ -1,0 +1,14 @@
+this need to be added in the solr schema file in the last
+
+
+<!-- EPrints fields -->
+<field name="eprintid"      type="string"       indexed="true" stored="true" multiValued="false"/>
+<field name="title"         type="text_general" indexed="true" stored="true" multiValued="false"/>
+<field name="abstract"      type="text_general" indexed="true" stored="true" multiValued="false"/>
+<field name="creators_name" type="string"       indexed="true" stored="true" multiValued="true"/>
+<field name="subjects"      type="string"       indexed="true" stored="true" multiValued="true"/>
+<field name="type"          type="string"       indexed="true" stored="true" multiValued="false"/>
+<field name="date"          type="string"       indexed="true" stored="true" multiValued="false"/>
+<field name="date_year"     type="string"       indexed="true" stored="true" multiValued="false"/>
+<field name="subject_name_name"     type="string"       indexed="true" stored="true" multiValued="false"/>
+<field name="subject_parents"     type="string"       indexed="true" stored="true" multiValued="false"/>
